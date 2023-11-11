@@ -299,7 +299,7 @@ u64_stats_update_end(&s->syncp);
 ```
 
 主要更新的就是报文数和数据量。est模块主要就是根据这个`cpustat`来更新数据。  
-\### 实现
+### 实现
 
 通过开启一个`kthread`实现。
 
@@ -313,7 +313,7 @@ u64_stats_update_end(&s->syncp);
 ```
 
 其中，rate表示两秒内的速率，右边的avgrate表示之前的值，这样就能够计算出新的avgrate值。  
-\### 数据访问
+### 数据访问
 
 得到的数据会拷贝到`ip_vs_stats_user`结构发送到用户态程序中。用户可以得到下面的数据(文件在`linux/include/uapi/linux/ip_vs.h`，`uapi`表示该头文件会被复制到系统头文件中，c语言`#include <linux/ip_vs.h>`即可访问到)：
 
