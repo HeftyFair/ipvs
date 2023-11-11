@@ -236,6 +236,108 @@ ip_vs_schedule(struct ip_vs_service *svc, const struct sk_buff *skb,
 
 `ip_vs_schedule`函数根据报文(`skb`)和ip头(`iph`)，从目前的服务表(`svc`)当中选择一个最合适的服务。具体的实现由动态加载的模块完成。
 
+# ip_vs_est.c
+
+统计某个开启的服务(service), 真实服务器(destination)，以及全部流量(tot_stats)的报文数目、速率信息。
+
+> 这部分代码当中有一些术语。Jiffy表示内核中的单位时间，也就是时间中断的次数，一个tick表示增加了一个单位时间，HZ表示一秒中Jiffy增加的个数。`now = jiffies;`表示读取`jiffies`这个全局变量，它记录了内核运行到当前时间的tick数目。
+
+ip_vs以每两秒的频率更新数据；同时，每隔`IPVS_EST_TICK`就会检查有没有数据需要更新。
+
+``` c
+/* Process estimators in multiple timer ticks (20/50/100, see ktrow) */
+#define IPVS_EST_NTICKS     50
+/* Estimation uses a 2-second period containing ticks (in jiffies) */
+#define IPVS_EST_TICK       ((2 * HZ) / IPVS_EST_NTICKS)
+```
+
+`ip_vs_est.c`主要就是为了往`ip_vs_estimator`结构写一些统计数据。
+
+``` c
+/* IPVS statistics objects */
+struct ip_vs_estimator {
+    struct hlist_node   list;
+
+    u64         last_inbytes;
+    u64         last_outbytes;
+    u64         last_conns;
+    u64         last_inpkts;
+    u64         last_outpkts;
+
+    u64         cps;
+    u64         inpps;
+    u64         outpps;
+    u64         inbps;
+    u64         outbps;
+
+    s32         ktid:16,    /* kthread ID, -1=temp list */
+                ktrow:8,    /* row/tick ID for kthread */
+                ktcid:8;    /* chain ID for kthread tick */
+};
+```
+
+这里的`:16`这种写法是为了控制字段的大小。  
+`ip_vs_estimator`结构是嵌入在`ip_vs_stats`里面的，而这个结构嵌入在`netns_ipvs`中。
+
+``` c
+struct ip_vs_stats {
+    struct ip_vs_kstats kstats;     /* kernel statistics */
+    struct ip_vs_estimator  est;        /* estimator */
+    struct ip_vs_cpu_stats __percpu *cpustats;  /* per cpu counters */
+    spinlock_t      lock;       /* spin lock */
+    struct ip_vs_kstats kstats0;    /* reset values */
+};
+```
+
+这里有一个变量声明为percpu的`cpustat`，关于percpu在后面([\#Per-CPU](#Per-CPU "wikilink"))中有介绍。ipvs处理进出的报文时，会分别调用`ip_vs_in_stats`和`ip_vs_out_stats`方法，更新percpu的变量值。这些函数会分别为service, destination, tot_stats更新一次。
+
+``` c
+u64_stats_update_begin(&s->syncp);
+u64_stats_inc(&s->cnt.outpkts);
+u64_stats_add(&s->cnt.outbytes, skb->len);
+u64_stats_update_end(&s->syncp);
+```
+
+主要更新的就是报文数和数据量。est模块主要就是根据这个`cpustat`来更新数据。  
+\### 实现
+
+通过开启一个`kthread`实现。
+
+`kthread`执行`ip_vs_estimation_kthread`函数，该函数每`IPVS_EST_TICK`就会检查需不需要更新（检查一个大小为`IPVS_EST_NTICKS`的数组，每次加一，这样检查到的正好时间间隔为2秒）。如果需要，调用`ip_vs_tick_estimation`来更新数据。
+
+`ip_vs_tick_estimation`会对每一个estimator（源码也称作`chain`）都调用`ip_vs_chain_estimation`函数。这个函数主要更新报文个数和速率，速率用下面的公式更新：
+
+``` txt
+    avgrate = avgrate*(1-W) + rate*W
+    where W = 2^(-2)
+```
+
+其中，rate表示两秒内的速率，右边的avgrate表示之前的值，这样就能够计算出新的avgrate值。  
+\### 数据访问
+
+得到的数据会拷贝到`ip_vs_stats_user`结构发送到用户态程序中。用户可以得到下面的数据(文件在`linux/include/uapi/linux/ip_vs.h`，`uapi`表示该头文件会被复制到系统头文件中，c语言`#include <linux/ip_vs.h>`即可访问到)：
+
+``` c
+/*
+ *  IPVS statistics object (for user space)
+ */
+struct ip_vs_stats_user {
+    __u32                   conns;          /* connections scheduled */
+    __u32                   inpkts;         /* incoming packets */
+    __u32                   outpkts;        /* outgoing packets */
+    __u64                   inbytes;        /* incoming bytes */
+    __u64                   outbytes;       /* outgoing bytes */
+
+    __u32           cps;        /* current connection rate */
+    __u32           inpps;      /* current in packet rate */
+    __u32           outpps;     /* current out packet rate */
+    __u32           inbps;      /* current in byte rate */
+    __u32           outbps;     /* current out byte rate */
+};
+```
+
+用命令行程序`ipvsadm`也可以看到这些数据(`--stat`)。
+
 # `ip_vs_xmit.c`
 
 执行对数据包的修改；实现的函数被写入`ip_vs_conn`的函数指针里，`packet_xmit`。  
@@ -505,6 +607,20 @@ void init_hash_table(void) {
 
 并发在linux内核编程下是一个比较复杂的话题，因为代码运行的上下文不同，可能持有不同的锁，比如netfilter的钩子就处于一个被RCU保护的锁里；同时，也有可能处于某个spinlock或者mutex里，如果处理不当可能导致一些并发相关的问题。
 
+### Per-CPU
+
+如果一个变量声明为percpu的，那么它就会为每一个cpu分配一次；每个cpu独享该变量，任何cpu都不能够访问其他cpu的值。下面的表描述了对于percpu变量的操作。
+
+<figure>
+<img
+src="IPVS%20source-media/8ce8d83cd5e3dfa701fa9183d5b297ab915c7d6e.png"
+title="wikilink" alt="Pasted image 20231106225654.png" />
+<figcaption aria-hidden="true">Pasted image
+20231106225654.png</figcaption>
+</figure>
+
+> percpu变量必须在非抢占式的上下文中进行。关于抢占和非抢占，可以参考现代操作系统(Modern Operating Systems)的2.4节。
+
 ### spinlock
 
 自旋锁是最简单的锁机制，用于保护很短时间内的代码段。当一个核（CPU核心）尝试获取一个已经被另一个核持有的自旋锁时，它会处于循环等待状态，也就是“自旋”，直到锁被释放。这意味着它不会将当前的执行线程置于睡眠状态。
@@ -622,14 +738,39 @@ xxHash的主要卖点是其速度和适用于性能敏感领域（如实时数�
 > http://vger.kernel.org/~davem/skb_sk.html  
 > http://vger.kernel.org/~davem/skb.html
 
-`struct sk_buff`表示内核中的一个数据包。
+`struct sk_buff`[^12]表示内核中的一个数据包，一般简称为`skb`。
 
-`struct sock`表示内核中经过udp、tcp协议处理后的一个`socket`，用于保存当前链接的状态。有一些比较重要的信息：  
+当网卡接收数据时，`sk_buff`通常由网卡的驱动程序调用`netdev_alloc_skb`或`alloc_skb`来创建。当报文自底向上由协议栈处理时，由`skb_pull`减少数据报长度。
+
+当需要发送数据时，由`sock_alloc_send_skb`和`sock_alloc_send_pskb`创建一个`sk_buff`。在报文自顶向下经过协议栈处理时，由`skb_push`来添加头部。
+
+需要注意的是，skb本身并不保存报文当中的数据，但是有指向这些数据的指针:  
+- head  
+- data  
+- tail  
+- end
+
+`struct sock`表示内核中经过udp、tcp协议处理后的一个`socket`，用于保存当前链接的状态。一般简称为`sk`。有一些比较重要的信息：  
 - 通信双方的地址和端口  
 - 链接状态  
 - 函数指针
 
-这部分有几篇博客可以参考[^12][^13]
+inet_create
+
+sk_alloc
+
+sk_common_release
+
+### skb 和 sk的关系
+
+sock是一个更上层的概念，接收到的报文需要经过传输层的处理后才会将一个skb和sock相关联（通过`__inet_lookup_skb`函数查找，也是一个查找哈希表的过程，`inet_hashtables.c`），如果本机并不处理该报文，例如作为路由器转发，那么就不会给skb关联一个sock结构。  
+sock保存了一个传输层链接的状态，例如对于TCP而言，一个链接有`LISTEN`, `ESTABLISHED`, `CLOSE_WAIT`等一系列状态，这些状态保存在`struct tcp_sock`里面，还有一些链接的参数，比如滑动窗口值都保存在这里面。
+
+这部分有几篇博客可以参考[^13][^14]
+
+## kthread
+
+一个kthread是一个调度的对象。
 
 ## 一些宏
 
@@ -649,7 +790,7 @@ xxHash的主要卖点是其速度和适用于性能敏感领域（如实时数�
 
 ### `do {} while(0)`
 
-c语言的宏替换是发生在生成ast之前的，因此宏的不当使用可能会导致对语法树的污染。例如，下面的例子（来源[^14]）
+c语言的宏替换是发生在生成ast之前的，因此宏的不当使用可能会导致对语法树的污染。例如，下面的例子（来源[^15]）
 
     ＃define foo(x)  a(x); b(x)
 
@@ -664,17 +805,29 @@ c语言的宏替换是发生在生成ast之前的，因此宏的不当使用可�
 
 # Appendix (Terminology)
 
-虚拟服务器：指ipvs对于外部主机的入口点  
-真实服务器：指配置到ipvs上的服务器，ipvs将发往虚拟服务器的包根据网络情况分发到真实服务器上。
+### 虚拟服务器
 
-dnat: 将公有地址转换为私有地址。
+指ipvs对于外部主机的入口点。  
+\### 真实服务器
 
-snat: 将私有地址转换为公有地址。
+指配置到ipvs上的服务器，ipvs将发往虚拟服务器的包根据网络情况分发到真实服务器上。
+
+### DNAT（目的网络地址转换）
+
+1.  **目的**：DNAT主要用于更改目标IP地址。
+2.  **应用场景**：当外部网络的请求需要路由到内部网络的特定设备或服务时使用，如托管在内部网络中的网站或服务器。
+
+### SNAT（源网络地址转换）
+
+1.  **目的**：SNAT主要用于更改数据包的源IP地址。
+2.  **应用场景**：当内部网络（如家庭或企业网络）中的设备想要访问外部网络（如互联网）时，SNAT会将这些设备的私有（内部）IP地址转换为公共（外部）IP地址。
 
 # Bibliography
 
 (书目)
 
+(Tanenbaum and Bos
+2015) 介绍了一些操作系统方面的理论知识，可以参考参考。  
 (Bovet and Cesati 2006) 是一本比较全面的讲linux内核知识的书。  
 (Benvenuti
 2006) 描述了linux内核网络堆栈的一些知识；比较详细，不过个人感觉讲的太多了，可以选择性地看一些章节。  
@@ -736,6 +889,14 @@ Addison-Wesley Pub. Co.
 
 </div>
 
+<div id="ref-tanenbaumModernOperatingSystems2015" class="csl-entry">
+
+Tanenbaum, Andrew S., and Herbert Bos. 2015. *Modern Operating Systems*.
+Fourth edition, global edition. Always Learning. Boston Columbus
+Indianapolis: Pearson.
+
+</div>
+
 <div id="ref-LinuxKernelModule" class="csl-entry">
 
 “The Linux Kernel Module Programming Guide.” n.d. Accessed November 5,
@@ -767,8 +928,10 @@ Addison-Wesley Pub. Co.
 
 [^11]: https://patchwork.kernel.org/project/linux-mm/patch/20180525011657.4qxrosmm3xjzo24w@xakep.localdomain/
 
-[^12]: https://switch-router.gitee.io/blog/linux-net-stack/
+[^12]: https://docs.kernel.org/networking/skbuff.html
 
-[^13]: https://arthurchiao.art/blog/linux-net-stack-implementation-rx-zh/
+[^13]: https://switch-router.gitee.io/blog/linux-net-stack/
 
-[^14]: https://laoar.github.io/blogs/289/
+[^14]: https://arthurchiao.art/blog/linux-net-stack-implementation-rx-zh/
+
+[^15]: https://laoar.github.io/blogs/289/
