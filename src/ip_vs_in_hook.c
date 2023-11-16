@@ -1,9 +1,13 @@
-ip_vs_conn.c
-```
 /**
  * @brief 在ip_vs_core.c的hook函数ip_vs_in_hook中被调用
  * cp = INDIRECT_CALL_1(pp->conn_in_get, ip_vs_conn_in_get_proto,
  *			    ipvs, af, skb, &iph);
+ * 其中的转入参数 skb是ip_vs_in_hook的传入参数之一    
+ * ipvs 在 ip_vs_in_hook 中    
+ * struct netns_ipvs *ipvs = net_ipvs(state->net);---state是in_hook参数之一，应该是netfilter产生的    
+ * iph（IP头部信息）在 ip_vs_in_hook 中    
+ * ip_vs_fill_iph_skb(af, skb, false, &iph);
+ * 该函数会返回在hashtable中查到的connect的完整信息的结构指针。
  *
  * @param ipvs struct netns_ipvs *  这个应该是linux的net namespace for ipvs ，
  * @param af  addr. family  (IPv4v6)
@@ -26,18 +30,11 @@ ip_vs_conn_in_get_proto(struct netns_ipvs *ipvs, int af,
     //找到连接数据
 	return ip_vs_conn_in_get(&p);
 }
-```
-其中的转入参数 skb是ip_vs_in_hook的传入参数之一    
-ipvs 在 ip_vs_in_hook 中    
-struct netns_ipvs *ipvs = net_ipvs(state->net);---state是in_hook参数之一，应该是netfilter产生的    
-iph（IP头部信息）在 ip_vs_in_hook 中    
-ip_vs_fill_iph_skb(af, skb, false, &iph);
-该函数会返回在hashtable中查到的connect的完整信息的结构指针。
 
-
-ip_vs.h
-连接所有的参数
-```
+/**
+ * @brief 连接的参数 5元组+addr. family
+ * 
+ */
 struct ip_vs_conn_param {
 	struct netns_ipvs		*ipvs;
 	const union nf_inet_addr	*caddr;
@@ -51,9 +48,7 @@ struct ip_vs_conn_param {
 	char				*pe_data;
 	__u8				pe_data_len;
 };
-```
 
-```
 struct ip_vs_conn *ip_vs_conn_in_get(const struct ip_vs_conn_param *p)
 {
 	struct ip_vs_conn *cp;
@@ -73,9 +68,7 @@ struct ip_vs_conn *ip_vs_conn_in_get(const struct ip_vs_conn_param *p)
 
 	return cp;
 }
-```
 
-```
 /**
  *  Gets ip_vs_conn associated with supplied parameters in the ip_vs_conn_tab.
  *  在hashtable里面通过parameter得到connect信息
@@ -102,7 +95,7 @@ __ip_vs_conn_in_get(const struct ip_vs_conn_param *p)
 		    ((!p->cport) ^ (!(cp->flags & IP_VS_CONN_F_NO_CPORT))) &&
 		    p->protocol == cp->protocol &&
 		    cp->ipvs == p->ipvs) {
-			if (!__ip_vs_conn_get(cp))
+			if (!__ip_vs_conn_get(cp)) //获取访问权限
 				continue;
 			/* HIT */
 			rcu_read_unlock();
@@ -114,4 +107,12 @@ __ip_vs_conn_in_get(const struct ip_vs_conn_param *p)
 
 	return NULL;
 }
-```
+
+/* Get reference to gain full access to conn.
+ * By default, RCU read-side critical sections have access only to
+ * conn fields and its PE data, see ip_vs_conn_rcu_free() for reference.
+ */
+static inline bool __ip_vs_conn_get(struct ip_vs_conn *cp)
+{
+	return refcount_inc_not_zero(&cp->refcnt);
+}
