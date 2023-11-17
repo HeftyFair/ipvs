@@ -298,7 +298,8 @@ u64_stats_add(&s->cnt.outbytes, skb->len);
 u64_stats_update_end(&s->syncp);
 ```
 
-主要更新的就是报文数和数据量。est模块主要就是根据这个`cpustat`来更新数据。  
+主要更新的就是报文数和数据量。est模块主要就是根据这个`cpustat`来更新数据。
+
 ### 实现
 
 通过开启一个`kthread`实现。
@@ -312,7 +313,8 @@ u64_stats_update_end(&s->syncp);
     where W = 2^(-2)
 ```
 
-其中，rate表示两秒内的速率，右边的avgrate表示之前的值，这样就能够计算出新的avgrate值。  
+其中，rate表示两秒内的速率，右边的avgrate表示之前的值，这样就能够计算出新的avgrate值。
+
 ### 数据访问
 
 得到的数据会拷贝到`ip_vs_stats_user`结构发送到用户态程序中。用户可以得到下面的数据(文件在`linux/include/uapi/linux/ip_vs.h`，`uapi`表示该头文件会被复制到系统头文件中，c语言`#include <linux/ip_vs.h>`即可访问到)：
@@ -755,18 +757,30 @@ xxHash的主要卖点是其速度和适用于性能敏感领域（如实时数�
 - 链接状态  
 - 函数指针
 
-inet_create
-
-sk_alloc
-
-sk_common_release
-
 ### skb 和 sk的关系
 
 sock是一个更上层的概念，接收到的报文需要经过传输层的处理后才会将一个skb和sock相关联（通过`__inet_lookup_skb`函数查找，也是一个查找哈希表的过程，`inet_hashtables.c`），如果本机并不处理该报文，例如作为路由器转发，那么就不会给skb关联一个sock结构。  
 sock保存了一个传输层链接的状态，例如对于TCP而言，一个链接有`LISTEN`, `ESTABLISHED`, `CLOSE_WAIT`等一系列状态，这些状态保存在`struct tcp_sock`里面，还有一些链接的参数，比如滑动窗口值都保存在这里面。
 
 这部分有几篇博客可以参考[^13][^14]
+
+## Napi, Softirq, Bottom Half
+
+softirq表示一个软中断。  
+内核驱动接收到网卡中断时，会先对网卡进行简单的处理，从网卡的ringbuffer中取出数据，分配skb，保存，然后结束处理。Napi管理了这一过程，通过聚合处理减少开销。  
+后续的处理是由一个软中断继续的，
+
+``` c
+open_softirq(NET_TX_SOFTIRQ, net_tx_action);
+open_softirq(NET_RX_SOFTIRQ, net_rx_action);
+```
+
+每一个CPU都有一个软中断处理进程；可以通过`cat /proc/softirqs`看到这些数据。  
+软中断也叫做`buttom half`。  
+在`buttom half`中，无法找到对应的线程，因此也无法使用调度相关的API，无法让出控制权(因为需要`task_struct`来保存上下文[^15])。
+
+协议栈的处理首先也是在`bottom half`进行的；需要找到对应的socket后，才会进入线程的上下文处理。  
+netfilter也是在软中断的上下文中，因此需要关注相关的并发控制结构。
 
 ## kthread
 
@@ -790,7 +804,7 @@ sock保存了一个传输层链接的状态，例如对于TCP而言，一个链�
 
 ### `do {} while(0)`
 
-c语言的宏替换是发生在生成ast之前的，因此宏的不当使用可能会导致对语法树的污染。例如，下面的例子（来源[^15]）
+c语言的宏替换是发生在生成ast之前的，因此宏的不当使用可能会导致对语法树的污染。例如，下面的例子（来源[^16]）
 
     ＃define foo(x)  a(x); b(x)
 
@@ -934,4 +948,6 @@ Indianapolis: Pearson.
 
 [^14]: https://arthurchiao.art/blog/linux-net-stack-implementation-rx-zh/
 
-[^15]: https://laoar.github.io/blogs/289/
+[^15]: https://switch-router.gitee.io/blog/lock-sock/
+
+[^16]: https://laoar.github.io/blogs/289/
