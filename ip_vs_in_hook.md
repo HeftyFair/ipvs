@@ -129,7 +129,8 @@ if (unlikely((skb->pkt_type != PACKET_HOST &&
 			  skb->pkt_type, iph.protocol,
 			  IP_VS_DBG_ADDR(af, &iph.daddr), hooknum);
 	return NF_ACCEPT;
-}```
+}
+```
 
 检查 IPVS 是否启用以及是否仅在备份模式下运行。然后，处理一个有效的套接字，当`hooknum`是 `NF_INET_LOCAL_OUT`，且地址族是 `AF_INET`（IPv4），则进行进一步的检查。如果套接字是 IPv4 类型（`PF_INET`），并且设置了 `nodefrag`，则函数同样返回 `NF_ACCEPT`。
 
@@ -149,7 +150,8 @@ if (unlikely(sk && hooknum == NF_INET_LOCAL_OUT &&
 
 	if (sk->sk_family == PF_INET && inet_sk(sk)->nodefrag)  // nodefrag 表示是否进行 IP 分片，1-不分片，0-分片。
 		return NF_ACCEPT;
-	}```
+	}
+```
     
 **处理ICMP数据包**：调用 `ip_vs_in_icmp` 或 `ip_vs_in_icmp_v6` 特别处理 ICMP 或 ICMPv6 数据包。
 
@@ -188,7 +190,8 @@ if (unlikely(!pd)) {
 		skb->ipvs_property = 1;
 
 	return NF_ACCEPT;
-}```
+}
+```
     
 **连接跟踪**：处理 IPVS 中对数据包的连接跟踪和管理。检查每个传入的数据包，确定它们是否属于一个现有的连接，或者是否需要创建新的连接。
 
@@ -239,7 +242,8 @@ if (!iph.fragoffs && is_new_conn(skb, &iph) && cp) {
 			return NF_DROP;
 		cp = NULL;
 	}
-	}```
+	}
+```
     
 **服务器状态检查**：检查和处理指向不可用目标服务器的连接。
 
@@ -265,7 +269,8 @@ if (cp && cp->dest && !(cp->dest->flags & IP_VS_DEST_F_AVAILABLE)) {
 		__ip_vs_conn_put(cp);
 		return NF_DROP;
 	}
-	}```
+	}
+```
 
 **一些后续处理**：如果数据包没有现有连接，尝试为其创建新的连接。此外，还涉及更新统计信息、设置连接状态、处理数据包传输，以及在需要时同步连接状态
 
@@ -316,6 +321,7 @@ else if ((cp->flags & IP_VS_CONN_F_ONE_PACKET) && cp->control)
 // 释放连接，返回结果
 ip_vs_conn_put(cp);
 return ret;
-	}```
+	}
+```
 
 
