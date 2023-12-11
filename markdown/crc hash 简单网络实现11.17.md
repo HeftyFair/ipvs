@@ -111,12 +111,6 @@ enum HashAlgorithm {
   - 根据主机的id分配主机号
   - 交换机之间的链路，两个接口的ip地址单独分配，mac地址随机分配。
 
-<table>
-    <caption>网络地址分配</caption>
-    <tr>
-        <td>网络地址</td>
-    </tr>
-</table>
 
 <img src = 'source\工作调研\topology_11_24.png'>
 
@@ -191,9 +185,9 @@ enum HashAlgorithm {
   ```
 - **读取的方案**
   - 如果使用`crc16_custom`或者`crc32_custom`, 可以通过声明时的顺序与register_name（register的变量名）进行绑定，在controller中通过
-  ```python
-  get_crc_calcs_num()
-  ```
+    ```python
+    get_crc_calcs_num()
+    ```
   来获得自定义crc哈希使用的次数
   - 通用方法
     - 直接获取交换机中的register信息
@@ -218,3 +212,12 @@ enum HashAlgorithm {
     - `id`: register id
     - `size`: register size
     - `bitwidth`: register cell size(Sketch bucket size)
+  - **目前进展**
+    - 已经在交换机的p4程序中实现了count-min sketch，正在controller中实现统计内容的提取工作（在controller中重新实现identity算法+读register+结果呈现）
+  - **下一步工作**
+    - 需要升级p4编译器为`20200408`版本以上。目前在使用的`20180101`版本的P4编译器对register的读写时传入参数的位宽有限制（32bits，而identity的hash结果为64bits）
+    这是写入寄存器的，可以看到对寄存器的索引有一个32位的限制。
+    ![version_error1](source/工作调研/version%2020180101(1).png)
+    读取寄存器同样
+    ![version_error2](source/工作调研/version%2020180101(2).png)
+    - 在controller中完成流包数量统计的读取，主要是检验在controller实现identity hash和p4内置identity是否一致。后续在这个基础上进一步改进sketch。
