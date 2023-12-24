@@ -90,7 +90,7 @@ topo = load_topo('topology.json')
 - [`get_routers(fields = [])`](#get_routers())  
   这个方法是对结点进行了筛选，依据是主机的`isRouter`属性为true，返回的是nodes的子集
 - `get_neighbors(name)`
-  输入为node name，返回为邻居结点的name(str)
+  输入为node name，返回为邻居结点的list of name(str)
 - `isNode()`
   输入为node name。如果节点存在，返回True；否则返回false
 - `checkNode(name)`
